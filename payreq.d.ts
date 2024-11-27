@@ -7,6 +7,21 @@ type RoutingInfo = Array<{
   fee_proportional_millionths: number;
   cltv_expiry_delta: number;
 }>;
+type BlindedHop = {
+  blinded_node_pubkey: string,
+  cipher_text: string
+};
+type BlindedPayInfo = {
+  fee_base_msat: number,
+  fee_proportional_millionths: number,
+  cltv_expiry_delta: number,
+  htlc_minimum_msat: bigint,
+  htlc_maximum_msat: bigint,
+  features: number[],
+  first_ephemeral_blinding_point: string,
+  blinded_hops: Array<BlindedHop>,
+  introduction_node: string
+};
 type FallbackAddress = {
   code: number;
   address: string;
@@ -47,7 +62,7 @@ type UnknownTag = {
 };
 
 // Start exports
-export declare type TagData = string | number | RoutingInfo | FallbackAddress | FeatureBits | UnknownTag;
+export declare type TagData = string | number | RoutingInfo | BlindedPayInfo | FallbackAddress | FeatureBits | UnknownTag;
 export declare type TagsObject = {
   payment_hash?: string;
   payment_secret?: string;
@@ -59,6 +74,7 @@ export declare type TagsObject = {
   fallback_address?: FallbackAddress;
   routing_info?: RoutingInfo;
   feature_bits?: FeatureBits;
+  blinded_payinfo: BlindedPayInfo[];
   unknownTags?: UnknownTag[];
 };
 export declare type PaymentRequestObject = {

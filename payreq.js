@@ -87,7 +87,8 @@ const TAGCODES = {
   min_final_cltv_expiry: 24, // default: 9
   fallback_address: 9,
   routing_info: 3, // for extra routing info (private etc.)
-  feature_bits: 5
+  feature_bits: 5,
+  blinded_payinfo: 20
 }
 
 // reverse the keys and values of TAGCODES and insert into TAGNAMES
@@ -109,6 +110,7 @@ const TAGENCODERS = {
   fallback_address: fallbackAddressEncoder,
   routing_info: routingInfoEncoder, // for extra routing info (private etc.)
   feature_bits: featureBitsEncoder
+  //TODO: Add tag encoder for blinded paths
 }
 
 const TAGPARSERS = {
@@ -121,7 +123,8 @@ const TAGPARSERS = {
   24: wordsToIntBE, // default: 9
   9: fallbackAddressParser,
   3: routingInfoParser, // for extra routing info (private etc.)
-  5: featureBitsParser // keep feature bits as array of 5 bit words
+  5: featureBitsParser, // keep feature bits as array of 5 bit words
+  20: blindedPathsParser
 }
 
 const unknownTagName = 'unknownTag'
@@ -276,6 +279,68 @@ function routingInfoParser (words) {
     })
   }
   return routes
+}
+
+function decodeBigSize(data, pointer) {
+  const firstByte = data.readUInt8(pointer);
+  pointer++;
+  switch(firstByte) {
+    case 0xfd:
+      return [data.readUInt16BE(pointer), pointer+2];
+    case 0xfe:
+      return [data.readUInt32BE(pointer), pointer+4];
+    case 0xff:
+      return [parseInt(data.slice(pointer, pointer+8).toString("hex"), 16), pointer+8];
+    default:
+      return [firstByte, pointer];
+  }
+}
+
+function decodeBlindedHop(data, pointer) {
+  const blinded_node_pubkey = data.slice(pointer, pointer+33);
+  pointer+=33;
+  const [cipher_text_length, _pointer] = decodeBigSize(data,pointer);
+  pointer = _pointer;
+  const cipher_text = data.slice(pointer, pointer+cipher_text_length);
+  pointer += cipher_text_length;
+  return [{
+    blinded_node_pubkey: blinded_node_pubkey.toString("hex"),
+    cipher_text: cipher_text.toString("hex")
+  }, pointer];
+}
+
+function blindedPathsParser (words) {
+  let data = wordsToBuffer(words, true)
+  const fee_base_msat = data.readUInt32BE(0);
+  const fee_proportional_millionths = data.readUInt32BE(4);
+  const cltv_expiry_delta = data.readUInt16BE(8);
+  const htlc_minimum_msat = BigInt("0x"+data.slice(10, 18).toString("hex"));
+  const htlc_maximum_msat = BigInt("0x"+data.slice(18, 26).toString("hex"));
+  const flen = data.readUInt16BE(26);
+  let pointer = 28;
+  const features = [...data.slice(pointer, pointer+flen)];
+  pointer += flen;
+  const first_ephemeral_blinding_point = data.slice(pointer, pointer+33).toString("hex");
+  pointer += 33;
+  const num_hops = data.readUInt8(pointer);
+  pointer++;
+  const blinded_hops = [];
+  for(let hop = 0;hop<num_hops;hop++) {
+    const [blinded_hop, _pointer] = decodeBlindedHop(data, pointer);
+    pointer = _pointer;
+    blinded_hops.push(blinded_hop);
+  }
+  return {
+    fee_base_msat,
+    fee_proportional_millionths,
+    cltv_expiry_delta,
+    htlc_minimum_msat,
+    htlc_maximum_msat,
+    features,
+    first_ephemeral_blinding_point,
+    blinded_hops,
+    introduction_node: blinded_hops[0].blinded_node_pubkey
+  }
 }
 
 function featureBitsParser (words) {
@@ -1019,7 +1084,12 @@ function getTagsObject (tags) {
       }
       result.unknownTags.push(tag.data)
     } else {
-      result[tag.tagName] = tag.data
+      if(tag.tagName==="blinded_payinfo") {
+        result[tag.tagName] ??= []
+        result[tag.tagName].push(tag.data)
+      } else {
+        result[tag.tagName] = tag.data
+      }
     }
   })
 
