@@ -1,12 +1,11 @@
 'use strict'
 
-const createHash = require('create-hash')
+const nobleSha256 = require('@noble/hashes/sha256').sha256
 const bech32 = require('bech32')
-const secp256k1 = require('secp256k1')
 const Buffer = require('safe-buffer').Buffer
-const BN = require('bn.js')
-const bitcoinjsAddress = require('bitcoinjs-lib').address
-const cloneDeep = require('lodash/cloneDeep')
+const bitcoin = require('@scure/btc-signer/payment')
+const nobleSecp256k1 = require('@noble/curves/secp256k1').secp256k1
+const cloneDeep = require('lodash.clonedeep')
 
 // defaults for encode; default timestamp is current time at call
 const DEFAULTNETWORK = {
@@ -14,25 +13,29 @@ const DEFAULTNETWORK = {
   bech32: 'bc',
   pubKeyHash: 0x00,
   scriptHash: 0x05,
-  validWitnessVersions: [0, 1]
+  validWitnessVersions: [0, 1],
+  wif: 0x80
 }
 const TESTNETWORK = {
   bech32: 'tb',
   pubKeyHash: 0x6f,
   scriptHash: 0xc4,
-  validWitnessVersions: [0, 1]
+  validWitnessVersions: [0, 1],
+  wif: 0xef
 }
 const REGTESTNETWORK = {
   bech32: 'bcrt',
   pubKeyHash: 0x6f,
   scriptHash: 0xc4,
-  validWitnessVersions: [0, 1]
+  validWitnessVersions: [0, 1],
+  wif: 0xef
 }
 const SIMNETWORK = {
   bech32: 'sb',
   pubKeyHash: 0x3f,
   scriptHash: 0x7b,
-  validWitnessVersions: [0, 1]
+  validWitnessVersions: [0, 1],
+  wif: 0xef
 }
 const DEFAULTEXPIRETIME = 3600
 const DEFAULTCLTVEXPIRY = 9
@@ -63,19 +66,19 @@ const FEATUREBIT_ORDER = [
 ]
 
 const DIVISORS = {
-  m: new BN(1e3, 10),
-  u: new BN(1e6, 10),
-  n: new BN(1e9, 10),
-  p: new BN(1e12, 10)
+  m: 1000n,
+  u: 1000000n,
+  n: 1000000000n,
+  p: 1000000000000n
 }
 
-const MAX_MILLISATS = new BN('2100000000000000000', 10)
+const MAX_MILLISATS = 2100000000000000000n
 
-const MILLISATS_PER_BTC = new BN(1e11, 10)
-const MILLISATS_PER_MILLIBTC = new BN(1e8, 10)
-const MILLISATS_PER_MICROBTC = new BN(1e5, 10)
-const MILLISATS_PER_NANOBTC = new BN(1e2, 10)
-const PICOBTC_PER_MILLISATS = new BN(10, 10)
+const MILLISATS_PER_BTC = 100000000000n
+const MILLISATS_PER_MILLIBTC = 100000000n
+const MILLISATS_PER_MICROBTC = 100000n
+const MILLISATS_PER_NANOBTC = 100n
+const PICOBTC_PER_MILLISATS = 10n
 
 const TAGCODES = {
   payment_hash: 1,
@@ -110,7 +113,7 @@ const TAGENCODERS = {
   fallback_address: fallbackAddressEncoder,
   routing_info: routingInfoEncoder, // for extra routing info (private etc.)
   feature_bits: featureBitsEncoder
-  //TODO: Add tag encoder for blinded paths
+  // TODO: Add tag encoder for blinded paths
 }
 
 const TAGPARSERS = {
@@ -160,7 +163,7 @@ function intBEToWords (intBE, bits) {
 }
 
 function sha256 (data) {
-  return createHash('sha256').update(data).digest()
+  return Buffer.from(nobleSha256(data))
 }
 
 function convert (data, inBits, outBits) {
@@ -229,14 +232,20 @@ function fallbackAddressParser (words, network) {
 
   switch (version) {
     case 17:
-      address = bitcoinjsAddress.toBase58Check(addressHash, network.pubKeyHash)
+      address = bitcoin.Address(network).encode({ type: 'pkh', hash: addressHash })
       break
     case 18:
-      address = bitcoinjsAddress.toBase58Check(addressHash, network.scriptHash)
+      address = bitcoin.Address(network).encode({ type: 'sh', hash: addressHash })
       break
     case 0:
+      if (addressHash.length === 20) {
+        address = bitcoin.Address(network).encode({ type: 'wpkh', hash: addressHash })
+      } else {
+        address = bitcoin.Address(network).encode({ type: 'wsh', hash: addressHash })
+      }
+      break
     case 1:
-      address = bitcoinjsAddress.toBech32(addressHash, version, network.bech32)
+      address = bitcoin.Address(network).encode({ type: 'tr', pubkey: addressHash })
       break
   }
 
@@ -281,65 +290,65 @@ function routingInfoParser (words) {
   return routes
 }
 
-function decodeBigSize(data, pointer) {
-  const firstByte = data.readUInt8(pointer);
-  pointer++;
-  switch(firstByte) {
+function decodeBigSize (data, pointer) {
+  const firstByte = data.readUInt8(pointer)
+  pointer++
+  switch (firstByte) {
     case 0xfd:
-      return [data.readUInt16BE(pointer), pointer+2];
+      return [data.readUInt16BE(pointer), pointer + 2]
     case 0xfe:
-      return [data.readUInt32BE(pointer), pointer+4];
+      return [data.readUInt32BE(pointer), pointer + 4]
     case 0xff:
-      return [parseInt(data.slice(pointer, pointer+8).toString("hex"), 16), pointer+8];
+      return [parseInt(data.slice(pointer, pointer + 8).toString('hex'), 16), pointer + 8]
     default:
-      return [firstByte, pointer];
+      return [firstByte, pointer]
   }
 }
 
-function decodeBlindedHop(data, pointer) {
-  const blinded_node_pubkey = data.slice(pointer, pointer+33);
-  pointer+=33;
-  const [cipher_text_length, _pointer] = decodeBigSize(data,pointer);
-  pointer = _pointer;
-  const cipher_text = data.slice(pointer, pointer+cipher_text_length);
-  pointer += cipher_text_length;
+function decodeBlindedHop (data, pointer) {
+  const blindedNodePubkey = data.slice(pointer, pointer + 33)
+  pointer += 33
+  const [cipherTextLength, _pointer] = decodeBigSize(data, pointer)
+  pointer = _pointer
+  const cipherText = data.slice(pointer, pointer + cipherTextLength)
+  pointer += cipherTextLength
   return [{
-    blinded_node_pubkey: blinded_node_pubkey.toString("hex"),
-    cipher_text: cipher_text.toString("hex")
-  }, pointer];
+    blinded_node_pubkey: blindedNodePubkey.toString('hex'),
+    cipher_text: cipherText.toString('hex')
+  }, pointer]
 }
 
 function blindedPathsParser (words) {
-  let data = wordsToBuffer(words, true)
-  const fee_base_msat = data.readUInt32BE(0);
-  const fee_proportional_millionths = data.readUInt32BE(4);
-  const cltv_expiry_delta = data.readUInt16BE(8);
-  const htlc_minimum_msat = BigInt("0x"+data.slice(10, 18).toString("hex"));
-  const htlc_maximum_msat = BigInt("0x"+data.slice(18, 26).toString("hex"));
-  const flen = data.readUInt16BE(26);
-  let pointer = 28;
-  const features = [...data.slice(pointer, pointer+flen)];
-  pointer += flen;
-  const first_ephemeral_blinding_point = data.slice(pointer, pointer+33).toString("hex");
-  pointer += 33;
-  const num_hops = data.readUInt8(pointer);
-  pointer++;
-  const blinded_hops = [];
-  for(let hop = 0;hop<num_hops;hop++) {
-    const [blinded_hop, _pointer] = decodeBlindedHop(data, pointer);
-    pointer = _pointer;
-    blinded_hops.push(blinded_hop);
+  const data = wordsToBuffer(words, true)
+  const feeBaseMsat = data.readUInt32BE(0)
+  const feeProportionalMillionths = data.readUInt32BE(4)
+  const cltvExpiryDelta = data.readUInt16BE(8)
+  const htlcMinimumMsat = BigInt('0x' + data.slice(10, 18).toString('hex'))
+  const htlcMaximumMsat = BigInt('0x' + data.slice(18, 26).toString('hex'))
+  const flen = data.readUInt16BE(26)
+  let pointer = 28
+  const features = [...data.slice(pointer, pointer + flen)]
+  pointer += flen
+  const firstEphemeralBlindingPoint = data.slice(pointer, pointer + 33).toString('hex')
+  pointer += 33
+  const numHops = data.readUInt8(pointer)
+  pointer++
+  const blindedHops = []
+  for (let hop = 0; hop < numHops; hop++) {
+    const [blindedHop, _pointer] = decodeBlindedHop(data, pointer)
+    pointer = _pointer
+    blindedHops.push(blindedHop)
   }
   return {
-    fee_base_msat,
-    fee_proportional_millionths,
-    cltv_expiry_delta,
-    htlc_minimum_msat,
-    htlc_maximum_msat,
+    fee_base_msat: feeBaseMsat,
+    fee_proportional_millionths: feeProportionalMillionths,
+    cltv_expiry_delta: cltvExpiryDelta,
+    htlc_minimum_msat: htlcMinimumMsat,
+    htlc_maximum_msat: htlcMaximumMsat,
     features,
-    first_ephemeral_blinding_point,
-    blinded_hops,
-    introduction_node: blinded_hops[0].blinded_node_pubkey
+    first_ephemeral_blinding_point: firstEphemeralBlindingPoint,
+    blinded_hops: blindedHops,
+    introduction_node: blindedHops[0].blinded_node_pubkey
   }
 }
 
@@ -495,44 +504,44 @@ function satToHrp (satoshis) {
   if (!satoshis.toString().match(/^\d+$/)) {
     throw new Error('satoshis must be an integer')
   }
-  const millisatoshisBN = new BN(satoshis, 10)
-  return millisatToHrp(millisatoshisBN.mul(new BN(1000, 10)))
+  const millisatoshisBN = BigInt(satoshis)
+  return millisatToHrp(millisatoshisBN * 1000n)
 }
 
 function millisatToHrp (millisatoshis) {
   if (!millisatoshis.toString().match(/^\d+$/)) {
     throw new Error('millisatoshis must be an integer')
   }
-  const millisatoshisBN = new BN(millisatoshis, 10)
+  const millisatoshisBN = BigInt(millisatoshis)
   const millisatoshisString = millisatoshisBN.toString(10)
   const millisatoshisLength = millisatoshisString.length
   let divisorString, valueString
   if (millisatoshisLength > 11 && /0{11}$/.test(millisatoshisString)) {
     divisorString = ''
-    valueString = millisatoshisBN.div(MILLISATS_PER_BTC).toString(10)
+    valueString = (millisatoshisBN / MILLISATS_PER_BTC).toString(10)
   } else if (millisatoshisLength > 8 && /0{8}$/.test(millisatoshisString)) {
     divisorString = 'm'
-    valueString = millisatoshisBN.div(MILLISATS_PER_MILLIBTC).toString(10)
+    valueString = (millisatoshisBN / MILLISATS_PER_MILLIBTC).toString(10)
   } else if (millisatoshisLength > 5 && /0{5}$/.test(millisatoshisString)) {
     divisorString = 'u'
-    valueString = millisatoshisBN.div(MILLISATS_PER_MICROBTC).toString(10)
+    valueString = (millisatoshisBN / MILLISATS_PER_MICROBTC).toString(10)
   } else if (millisatoshisLength > 2 && /0{2}$/.test(millisatoshisString)) {
     divisorString = 'n'
-    valueString = millisatoshisBN.div(MILLISATS_PER_NANOBTC).toString(10)
+    valueString = (millisatoshisBN / MILLISATS_PER_NANOBTC).toString(10)
   } else {
     divisorString = 'p'
-    valueString = millisatoshisBN.mul(PICOBTC_PER_MILLISATS).toString(10)
+    valueString = (millisatoshisBN * PICOBTC_PER_MILLISATS).toString(10)
   }
   return valueString + divisorString
 }
 
 function hrpToSat (hrpString, outputString) {
   const millisatoshisBN = hrpToMillisat(hrpString, false)
-  if (!millisatoshisBN.mod(new BN(1000, 10)).eq(new BN(0, 10))) {
+  if ((millisatoshisBN % 1000n) !== 0n) {
     throw new Error('Amount is outside of valid range')
   }
-  const result = millisatoshisBN.div(new BN(1000, 10))
-  return outputString ? result.toString() : result
+  const result = millisatoshisBN / 1000n
+  return outputString ? result.toString(10) : result
 }
 
 function hrpToMillisat (hrpString, outputString) {
@@ -548,18 +557,18 @@ function hrpToMillisat (hrpString, outputString) {
 
   if (!value.match(/^\d+$/)) throw new Error('Not a valid human readable amount')
 
-  const valueBN = new BN(value, 10)
+  const valueBN = BigInt(value)
 
   const millisatoshisBN = divisor
-    ? valueBN.mul(MILLISATS_PER_BTC).div(DIVISORS[divisor])
-    : valueBN.mul(MILLISATS_PER_BTC)
+    ? (valueBN * MILLISATS_PER_BTC / DIVISORS[divisor])
+    : (valueBN * MILLISATS_PER_BTC)
 
-  if (((divisor === 'p' && !valueBN.mod(new BN(10, 10)).eq(new BN(0, 10))) ||
-      millisatoshisBN.gt(MAX_MILLISATS))) {
+  if (((divisor === 'p' && (valueBN % 10n) !== 0n) ||
+      millisatoshisBN > MAX_MILLISATS)) {
     throw new Error('Amount is outside of valid range')
   }
 
-  return outputString ? millisatoshisBN.toString() : millisatoshisBN
+  return outputString ? millisatoshisBN.toString(10) : millisatoshisBN
 }
 
 function sign (inputPayReqObj, inputPrivateKey) {
@@ -568,7 +577,7 @@ function sign (inputPayReqObj, inputPrivateKey) {
   if (payReqObj.complete && payReqObj.paymentRequest) return payReqObj
 
   if (privateKey === undefined || privateKey.length !== 32 ||
-      !secp256k1.privateKeyVerify(privateKey)) {
+      !nobleSecp256k1.utils.isValidPrivateKey(privateKey)) {
     throw new Error('privateKey must be a 32 byte Buffer and valid private key')
   }
 
@@ -589,7 +598,7 @@ function sign (inputPayReqObj, inputPrivateKey) {
   // make sure if either exist they are in nodePublicKey
   nodePublicKey = tagNodePublicKey || nodePublicKey
 
-  const publicKey = Buffer.from(secp256k1.publicKeyCreate(privateKey))
+  const publicKey = Buffer.from(nobleSecp256k1.getPublicKey(privateKey, true))
 
   // Check if pubkey matches for private key
   if (nodePublicKey && !publicKey.equals(nodePublicKey)) {
@@ -608,14 +617,13 @@ function sign (inputPayReqObj, inputPrivateKey) {
   // signature is 64 bytes (32 byte r value and 32 byte s value concatenated)
   // PLUS one extra byte appended to the right with the recoveryID in [0,1,2,3]
   // Then convert to 5 bit words with right padding 0 bits.
-  const sigObj = secp256k1.ecdsaSign(payReqHash, privateKey)
-  sigObj.signature = Buffer.from(sigObj.signature)
-  const sigWords = hexToWord(sigObj.signature.toString('hex') + '0' + sigObj.recid)
+  const sigObj = nobleSecp256k1.sign(payReqHash, privateKey, { lowS: true })
+  payReqObj.signature = Buffer.from(sigObj.toCompactRawBytes()).toString('hex')
+  const sigWords = hexToWord(payReqObj.signature + '0' + sigObj.recovery)
 
   // append signature words to the words, mark as complete, and add the payreq
   payReqObj.payeeNodeKey = publicKey.toString('hex')
-  payReqObj.signature = sigObj.signature.toString('hex')
-  payReqObj.recoveryFlag = sigObj.recid
+  payReqObj.recoveryFlag = sigObj.recovery
   payReqObj.wordsTemp = bech32.encode('temp', words.concat(sigWords), Number.MAX_SAFE_INTEGER)
   payReqObj.complete = true
   payReqObj.paymentRequest = bech32.encode(payReqObj.prefix, words.concat(sigWords), Number.MAX_SAFE_INTEGER)
@@ -640,12 +648,13 @@ function encode (inputData, addDefaults) {
   } else if (data.network === undefined && canReconstruct) {
     throw new Error('Need network for proper payment request reconstruction')
   } else {
-    // if the coinType is not a valid name of a network in bitcoinjs-lib, fail
+    // if the coinType is not a valid name of a network in @scure/btc-signer, fail
     if (
       !data.network.bech32 ||
       data.network.pubKeyHash === undefined ||
       data.network.scriptHash === undefined ||
-      !Array.isArray(data.network.validWitnessVersions)
+      !Array.isArray(data.network.validWitnessVersions) ||
+      data.network.wif === undefined
     ) throw new Error('Invalid network')
     coinTypeObj = data.network
   }
@@ -740,40 +749,42 @@ function encode (inputData, addDefaults) {
     code = addrData.code
 
     if (addressHash === undefined || code === undefined) {
-      let bech32addr, base58addr
+      let res
       try {
-        bech32addr = bitcoinjsAddress.fromBech32(address)
-        addressHash = bech32addr.data
-        code = bech32addr.version
+        res = bitcoin.Address(coinTypeObj).decode(address)
       } catch (e) {
-        try {
-          base58addr = bitcoinjsAddress.fromBase58Check(address)
-          if (base58addr.version === coinTypeObj.pubKeyHash) {
-            code = 17
-          } else if (base58addr.version === coinTypeObj.scriptHash) {
-            code = 18
-          }
-          addressHash = base58addr.hash
-        } catch (f) {
-          throw new Error('Fallback address type is unknown')
-        }
+        throw new Error('Fallback address invalid format')
       }
-      if (bech32addr && !(bech32addr.version in coinTypeObj.validWitnessVersions)) {
-        throw new Error('Fallback address witness version is unknown')
-      }
-      if (bech32addr && bech32addr.prefix !== coinTypeObj.bech32) {
-        throw new Error('Fallback address network type does not match payment request network type')
-      }
-      if (base58addr && base58addr.version !== coinTypeObj.pubKeyHash &&
-          base58addr.version !== coinTypeObj.scriptHash) {
-        throw new Error('Fallback address version (base58) is unknown or the network type is incorrect')
+      switch (res.type) {
+        case 'pkh':
+          addressHash = res.hash
+          code = 17
+          break
+        case 'sh':
+          addressHash = res.hash
+          code = 18
+          break
+        case 'wsh':
+          addressHash = res.hash
+          code = 0
+          break
+        case 'wpkh':
+          addressHash = res.hash
+          code = 0
+          break
+        case 'tr':
+          addressHash = res.pubkey
+          code = 1
+          break
+        default:
+          throw new Error('Fallback address format is unknown')
       }
 
       // FIXME: If addressHash or code is missing, add them to the original Object
       // after parsing the address value... this changes the actual attributes of the data object.
       // Not very clean.
       // Without this, a person can not specify a fallback address tag with only the address key.
-      addrData.addressHash = addressHash.toString('hex')
+      addrData.addressHash = Buffer.from(addressHash).toString('hex')
       addrData.code = code
     }
   }
@@ -789,7 +800,9 @@ function encode (inputData, addDefaults) {
         route.cltv_expiry_delta === undefined) {
         throw new Error('Routing info is incomplete')
       }
-      if (!secp256k1.publicKeyVerify(hexToBuffer(route.pubkey))) {
+      try {
+        nobleSecp256k1.ProjectivePoint.fromHex(hexToBuffer(route.pubkey))
+      } catch (e) {
         throw new Error('Routing info pubkey is not a valid pubkey')
       }
       const shortId = hexToBuffer(route.short_channel_id)
@@ -818,15 +831,15 @@ function encode (inputData, addDefaults) {
   // calculate the smallest possible integer (removing zeroes) and add the best
   // divisor (m = milli, u = micro, n = nano, p = pico)
   if (data.millisatoshis && data.satoshis) {
-    hrpString = millisatToHrp(new BN(data.millisatoshis, 10))
-    const hrpStringSat = satToHrp(new BN(data.satoshis, 10))
+    hrpString = millisatToHrp(BigInt(data.millisatoshis))
+    const hrpStringSat = satToHrp(BigInt(data.satoshis))
     if (hrpStringSat !== hrpString) {
       throw new Error('satoshis and millisatoshis do not match')
     }
   } else if (data.millisatoshis) {
-    hrpString = millisatToHrp(new BN(data.millisatoshis, 10))
+    hrpString = millisatToHrp(BigInt(data.millisatoshis))
   } else if (data.satoshis) {
-    hrpString = satToHrp(new BN(data.satoshis, 10))
+    hrpString = satToHrp(BigInt(data.satoshis))
   } else {
     hrpString = ''
   }
@@ -895,7 +908,8 @@ function encode (inputData, addDefaults) {
     Earlier we check if the private key matches the payee node key IF they
     gave one. */
     if (nodePublicKey) {
-      const recoveredPubkey = Buffer.from(secp256k1.ecdsaRecover(Buffer.from(data.signature, 'hex'), data.recoveryFlag, payReqHash, true))
+      const signature = nobleSecp256k1.Signature.fromCompact(Buffer.from(data.signature, 'hex')).addRecoveryBit(data.recoveryFlag)
+      const recoveredPubkey = Buffer.from(signature.recoverPublicKey(payReqHash).toRawBytes(true))
       if (nodePublicKey && !nodePublicKey.equals(recoveredPubkey)) {
         throw new Error('Signature, message, and recoveryID did not produce the same pubkey as payeeNodeKey')
       }
@@ -981,7 +995,8 @@ function decode (paymentRequest, network) {
       network.bech32 === undefined ||
       network.pubKeyHash === undefined ||
       network.scriptHash === undefined ||
-      !Array.isArray(network.validWitnessVersions)
+      !Array.isArray(network.validWitnessVersions) ||
+      network.wif === undefined
     ) throw new Error('Invalid network')
     coinNetwork = network
   }
@@ -1043,7 +1058,10 @@ function decode (paymentRequest, network) {
 
   const toSign = Buffer.concat([Buffer.from(prefix, 'utf8'), Buffer.from(convert(wordsNoSig, 5, 8))])
   const payReqHash = sha256(toSign)
-  const sigPubkey = Buffer.from(secp256k1.ecdsaRecover(sigBuffer, recoveryFlag, payReqHash, true))
+
+  const signature = nobleSecp256k1.Signature.fromCompact(sigBuffer).addRecoveryBit(recoveryFlag)
+  const sigPubkey = Buffer.from(signature.recoverPublicKey(payReqHash).toRawBytes(true))
+
   if (tagsContainItem(tags, TAGNAMES['19']) && tagsItems(tags, TAGNAMES['19']) !== sigPubkey.toString('hex')) {
     throw new Error('Lightning Payment Request signature pubkey does not match payee pubkey')
   }
@@ -1084,8 +1102,8 @@ function getTagsObject (tags) {
       }
       result.unknownTags.push(tag.data)
     } else {
-      if(tag.tagName==="blinded_payinfo") {
-        result[tag.tagName] ??= []
+      if (tag.tagName === 'blinded_payinfo') {
+        if (result[tag.tagName] == null) result[tag.tagName] = []
         result[tag.tagName].push(tag.data)
       } else {
         result[tag.tagName] = tag.data

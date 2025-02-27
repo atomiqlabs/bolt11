@@ -2,19 +2,18 @@
 const tape = require('tape')
 const fixtures = require('./fixtures')
 const lnpayreq = require('../')
-const BN = require('bn.js')
 
 fixtures.satToHrp.valid.forEach((f) => {
   tape('test valid satoshi to hrp string', (t) => {
     t.plan(1)
-    t.same(f.output, lnpayreq.satToHrp(new BN(f.input, 10)))
+    t.same(f.output, lnpayreq.satToHrp(BigInt(f.input)))
   })
 })
 
 fixtures.millisatToHrp.valid.forEach((f) => {
   tape('test valid millisatoshi to hrp string', (t) => {
     t.plan(1)
-    t.same(f.output, lnpayreq.millisatToHrp(new BN(f.input, 10)))
+    t.same(f.output, lnpayreq.millisatToHrp(BigInt(f.input)))
   })
 })
 
@@ -204,7 +203,7 @@ tape('decode detects invalid network', (t) => {
   const f = fixtures.decode.valid[3]
   t.throws(() => {
     lnpayreq.decode(f.paymentRequest, { bech32: 'bc' })
-  }, new RegExp('Invalid network'))
+  }, /Invalid network/)
   t.end()
 })
 
@@ -251,7 +250,8 @@ tape('can decode and encode payment request containing unknown tags', (t) => {
     bech32: 'tb',
     pubKeyHash: 0x6f,
     scriptHash: 0xc4,
-    validWitnessVersions: [0, 1]
+    validWitnessVersions: [0, 1],
+    wif: 239
   })
   t.ok(decoded.complete === true)
 
@@ -273,7 +273,7 @@ tape('can decode and encode payment request containing unknown tags', (t) => {
 
   t.throws(() => {
     lnpayreq.encode(decoded)
-  }, new RegExp('Unknown tag key: unknownTag'))
+  }, /Unknown tag key: unknownTag/)
 
   t.end()
 })
@@ -283,7 +283,8 @@ tape('can decode unknown network payment request', (t) => {
     bech32: 'sb',
     pubKeyHash: 0x6f,
     scriptHash: 0xc4,
-    validWitnessVersions: [0, 1]
+    validWitnessVersions: [0, 1],
+    wif: 239
   }
   const decoded = lnpayreq.decode(
     'lnsb1u1pwslkj8pp52u27w39645j24a0zfxnwytshxserjchdqt8nz8uwv9fp8wasxrhsdq' +
@@ -304,7 +305,8 @@ tape('can encode and decode small timestamp', (t) => {
       bech32: 'tb',
       pubKeyHash: 111,
       scriptHash: 196,
-      validWitnessVersions: [0, 1]
+      validWitnessVersions: [0, 1],
+      wif: 239
     },
     tags: [
       {

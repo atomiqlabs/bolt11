@@ -1,4 +1,3 @@
-import BN from "bn.js";
 
 type RoutingInfo = Array<{
   pubkey: string;
@@ -102,5 +101,5 @@ export declare function decode(paymentRequest: string, network?: Network): Payme
 export declare function sign(inputPayReqObj: PaymentRequestObject, inputPrivateKey: string | Buffer): PaymentRequestObject;
 export declare function satToHrp(satoshis: number | string): string;
 export declare function millisatToHrp(millisatoshis: number | string): string;
-export declare function hrpToSat(hrpString: string, outputString?: boolean): string | BN;
-export declare function hrpToMillisat(hrpString: string, outputString?: boolean): string | BN;
+export declare function hrpToSat(hrpString: string, outputString?: boolean): string | bigint;
+export declare function hrpToMillisat(hrpString: string, outputString?: boolean): string | bigint;
